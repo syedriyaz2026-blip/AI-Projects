@@ -1,0 +1,68 @@
+"""Configuration for executing generated SQL queries from GCS."""
+import os
+
+# Project where BigQuery query jobs are created and billed.
+EXECUTION_PROJECT_ID = os.getenv(
+    "BIGQUERY_EXECUTION_PROJECT",
+    "vf-grp-gbissdbx-dev-1"
+)
+
+# Project containing the source and target BigQuery datasets.
+DATA_PROJECT_ID = os.getenv(
+    "BIGQUERY_DATA_PROJECT",
+    "vf-gr-mc2-nonlive"
+)
+
+LOCATION = os.getenv(
+    "BIGQUERY_LOCATION",
+    "europe-west2"
+)
+
+INPUT_BUCKET = os.getenv(
+    "GCS_RESULTS_BUCKET",
+    "narasimha-test-bucket"
+)
+
+INPUT_FOLDER = os.getenv(
+    "GCS_SQL_INPUT_PREFIX",
+    "vois-transformsql/sql-input"
+)
+
+OUTPUT_BUCKET = os.getenv(
+    "GCS_RESULTS_BUCKET",
+    "narasimha-test-bucket"
+)
+
+OUTPUT_FOLDER = os.getenv(
+    "GCS_EXECUTION_REPORTS_PREFIX",
+    "vois-transformsql/execution-reports"
+)
+
+ENABLE_DRY_RUN = os.getenv(
+    "TRANSFORMSQL_DRY_RUN_ENABLED",
+    "true"
+).lower() in {"1", "true", "yes", "on"}
+
+CONTINUE_ON_ERROR = os.getenv(
+    "CONTINUE_ON_ERROR",
+    "true"
+).lower() in {"1", "true", "yes", "on"}
+
+QUERY_TIMEOUT_SECONDS = int(
+    os.getenv("QUERY_TIMEOUT_SECONDS", "1800")
+)
+
+MAX_RESULT_ROWS = (
+    int(os.getenv("BIGQUERY_MAX_ROWS", "5000"))
+    if os.getenv("BIGQUERY_MAX_ROWS", "5000")
+    else None
+)
+
+MAXIMUM_BYTES_BILLED = (
+    int(os.getenv("BIGQUERY_MAX_BYTES_BILLED", "1000000000"))
+    if os.getenv("BIGQUERY_MAX_BYTES_BILLED", "1000000000")
+    else None
+)
+
+# Backward-compatible alias.
+PROJECT_ID = EXECUTION_PROJECT_ID

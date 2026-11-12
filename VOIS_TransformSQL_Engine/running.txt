@@ -1,0 +1,96 @@
+VOIS TRANSFORMSQL - WINDOWS POWERSHELL QUICK RUN
+===============================================
+
+Use this file after placing the complete Sameer_Module folder anywhere, including Downloads.
+Open PowerShell, change directory into this folder, then paste the commands below.
+
+IMPORTANT:
+- Run this inside the Vertex AI / Workbench environment where BigQuery access is already configured.
+- Do not paste a service-account JSON file into this folder.
+- VOIS uses the active Vertex/Google Application Default Credentials automatically.
+- The Settings page only reports the runtime connection and tests it; teammates do not configure credentials in VOIS.
+- The runtime identity needs BigQuery Job User and BigQuery Data Viewer permissions.
+
+ONE-GO POWERSHELL START COMMANDS
+--------------------------------
+
+$ModuleRoot = (Get-Location).Path
+Set-Location $ModuleRoot
+
+if (-not (Test-Path -LiteralPath '.\backend\.env')) {
+    Copy-Item -LiteralPath '.\backend\.env.example' -Destination '.\backend\.env'
+}
+
+python -m pip install -r '.\backend\requirements.txt'
+
+# Stop only previous VOIS backend processes using the single application port.
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+    Where-Object { $_.CommandLine -match 'transformsql_engine.py --serve --port 8080' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+    Where-Object { $_.CommandLine -match '-m http.server 8080' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+Start-Process -FilePath 'python' `
+    -ArgumentList 'transformsql_engine.py --serve --port 8080' `
+    -WorkingDirectory (Join-Path $ModuleRoot 'backend') `
+    -WindowStyle Hidden
+
+Start-Sleep -Seconds 2
+
+Invoke-WebRequest 'http://localhost:8080/healthz' -UseBasicParsing
+# Open Web Preview manually on port 8080 when you are ready.
+
+VERTEX AI / CLOUD SHELL SYNCHRONIZED RUNNER
+-------------------------------------------
+
+For the pull -> test -> run -> report -> push workflow, use Cloud Shell:
+
+```bash
+cd ~/VOIS_TransformSQL_Engine
+git pull origin main
+chmod +x vertex_run.sh
+INPUT_XLSX=/path/to/your/workbook.xlsx ./vertex_run.sh
+```
+
+The runner automatically pulls the latest code first, installs dependencies, checks backend and frontend syntax, parses the workbook, starts both services, checks Vertex/Google ADC readiness, writes a non-secret Markdown report under `run-reports/`, commits the report, and pushes it to `origin/main`. Exit code `0` means no failures; exit code `1` means inspect `run-reports/latest.md`, `backend.log`, and `frontend.log`.
+
+After a fix is pushed from this repository, run the same command again in Vertex. It pulls the fix before testing. The runner refuses to overwrite uncommitted local changes.
+
+LOCAL LOGIN
+-----------
+
+Username: admin
+Password: transform123
+
+VERTEX RUNTIME AUTHENTICATION
+--------------------
+
+The backend uses Vertex Application Default Credentials automatically.
+The standard VOIS project, source dataset, target dataset, and GCS bucket are preconfigured
+and displayed in the UI. No source/target prerequisite prompts are shown in the terminal.
+Environment variables can override the defaults only when deploying another environment.
+Optional runtime controls such as BIGQUERY_LOCATION and BIGQUERY_MAX_ROWS may remain in .env.
+
+All environment variables are loaded automatically from backend/.env when the backend starts.
+The VOIS Settings page is intentionally separate and shows the runtime BigQuery connection.
+
+STOP COMMANDS
+-------------
+
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+    Where-Object { $_.CommandLine -match 'transformsql_engine.py --serve --port 8081' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+    Where-Object { $_.CommandLine -match '-m http.server 8080' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+URLS
+----
+
+VOIS UI: http://localhost:8080
+Backend health: http://localhost:8081/healthz
+Backend readiness: http://localhost:8081/readyz
+Settings API: http://localhost:8081/api/settings

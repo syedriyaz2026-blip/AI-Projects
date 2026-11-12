@@ -1,0 +1,82 @@
+"""Configuration for executing TransformSQL queries from GCS."""
+import os
+
+# Vertex AI / Workbench runtime project.
+RUNTIME_PROJECT_ID = os.getenv(
+    "GOOGLE_CLOUD_PROJECT",
+    "vf-grp-gbissdbx-dev-1"
+)
+
+# BigQuery project where query jobs must be created.
+BIGQUERY_JOB_PROJECT_ID = os.getenv("BIGQUERY_PROJECT", "vf-grp-gbissdbx-dev-1")
+    "BIGQUERY_JOB_PROJECT",
+    "vf-gr-mc2-nonlive"
+)
+
+# Project containing source and target datasets.
+BIGQUERY_DATA_PROJECT_ID = os.getenv("BIGQUERY_DATA_PROJECT", "vf-grp-gbissdbx-dev-1")
+    "BIGQUERY_DATA_PROJECT",
+    "vf-gr-mc2-nonlive"
+)
+
+LOCATION = os.getenv("BIGQUERY_LOCATION", "EU")
+    "BIGQUERY_LOCATION",
+    "europe-west2"
+)
+
+INPUT_BUCKET = os.getenv(
+    "GCS_RESULTS_BUCKET",
+    "narasimha-test-bucket"
+)
+
+INPUT_FOLDER = os.getenv(
+    "GCS_SQL_INPUT_PREFIX",
+    "vois-transformsql/sql-input"
+)
+
+OUTPUT_BUCKET = os.getenv(
+    "GCS_RESULTS_BUCKET",
+    "narasimha-test-bucket"
+)
+
+OUTPUT_FOLDER = os.getenv(
+    "GCS_EXECUTION_REPORTS_PREFIX",
+    "vois-transformsql/execution-reports"
+)
+
+ENABLE_DRY_RUN = os.getenv(
+    "TRANSFORMSQL_DRY_RUN_ENABLED",
+    "true"
+).lower() in {"1", "true", "yes", "on"}
+
+CONTINUE_ON_ERROR = os.getenv(
+    "CONTINUE_ON_ERROR",
+    "false"
+).lower() in {"1", "true", "yes", "on"}
+
+QUERY_TIMEOUT_SECONDS = int(
+    os.getenv("QUERY_TIMEOUT_SECONDS", "1800")
+)
+
+MAX_RESULT_ROWS_ENV = os.getenv("BIGQUERY_MAX_ROWS", "5000")
+MAX_RESULT_ROWS = (
+    int(MAX_RESULT_ROWS_ENV)
+    if MAX_RESULT_ROWS_ENV
+    else None
+)
+
+MAXIMUM_BYTES_BILLED_ENV = os.getenv(
+    "BIGQUERY_MAX_BYTES_BILLED",
+    "1000000000"
+)
+
+MAXIMUM_BYTES_BILLED = (
+    int(MAXIMUM_BYTES_BILLED_ENV)
+    if MAXIMUM_BYTES_BILLED_ENV
+    else None
+)
+
+# Backward compatibility with the current executor.
+PROJECT_ID = os.getenv("BIGQUERY_PROJECT", "vf-grp-gbissdbx-dev-1")
+EXECUTION_PROJECT_ID = os.getenv("BIGQUERY_PROJECT", "vf-grp-gbissdbx-dev-1")
+DATA_PROJECT_ID = os.getenv("BIGQUERY_DATA_PROJECT", "vf-grp-gbissdbx-dev-1")

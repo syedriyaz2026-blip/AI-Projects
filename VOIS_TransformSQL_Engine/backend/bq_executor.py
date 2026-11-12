@@ -1,0 +1,133 @@
+from __future__ import annotations
+import logging, re, sys, time, traceback
+from datetime import datetime, timezone
+from io import BytesIO
+from pathlib import PurePosixPath
+from typing import Dict, List, Set
+import pandas as pd
+from google.api_core import exceptions as gexc
+from google.cloud import bigquery, storage
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+from executor_config import *
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+LOG = logging.getLogger("bq-executor")
+EXCEL_DATA_ROWS = 1_048_575
+INVALID_SHEET_CHARS = r"[\[\]:*?/\\]"
+
+def safe_sheet_name(file_name: str, used: Set[str], suffix: str = "") -> str:
+    base = re.sub(INVALID_SHEET_CHARS, "_", PurePosixPath(file_name).stem)
+    base = re.sub(r"\s+", " ", base).strip() or "Query_Result"
+    candidate = (base[:31-len(suffix)] + suffix)[:31]
+    n = 2
+    while candidate.lower() in used:
+        extra = f"_{n}"; candidate = candidate[:31-len(extra)] + extra; n += 1
+    used.add(candidate.lower()); return candidate
+
+def excel_compatible(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in out.columns:
+        if isinstance(out[col].dtype, pd.DatetimeTZDtype):
+            out[col] = out[col].dt.tz_convert("UTC").dt.tz_localize(None)
+        if out[col].dtype == "object":
+            out[col] = out[col].map(lambda v: str(v) if isinstance(v, (dict, list, tuple, set)) else v)
+    return out
+
+def write_result(writer, df: pd.DataFrame, file_name: str, used: Set[str]) -> List[str]:
+    df = excel_compatible(df)
+    if df.empty:
+        sheet = safe_sheet_name(file_name, used)
+        pd.DataFrame({"Result": ["Query completed successfully; final statement returned no rows."]}).to_excel(writer, sheet_name=sheet, index=False)
+        return [sheet]
+    count = (len(df) + EXCEL_DATA_ROWS - 1) // EXCEL_DATA_ROWS
+    sheets = []
+    for i in range(count):
+        suffix = f"_P{i+1}" if count > 1 else ""
+        sheet = safe_sheet_name(file_name, used, suffix)
+        df.iloc[i*EXCEL_DATA_ROWS:(i+1)*EXCEL_DATA_ROWS].to_excel(writer, sheet_name=sheet, index=False)
+        sheets.append(sheet)
+    return sheets
+
+def job_config(dry_run=False):
+    cfg = bigquery.QueryJobConfig(use_legacy_sql=False, dry_run=dry_run)
+    cfg.labels = {"application": "gcs-sql-executor"}
+    if dry_run: cfg.use_query_cache = False
+    if MAXIMUM_BYTES_BILLED is not None: cfg.maximum_bytes_billed = MAXIMUM_BYTES_BILLED
+    return cfg
+
+def execute_script(client, sql_script):
+    dry_bytes, dry_warning = None, ""
+    if ENABLE_DRY_RUN:
+        try:
+            dry_job = client.query(sql_script, job_config=job_config(True), location=LOCATION)
+            dry_bytes = int(dry_job.total_bytes_processed or 0)
+        except Exception as error:
+            dry_warning = f"{type(error).__name__}: {error}"
+            # Safety correction: do not execute a query that failed dry-run.
+            raise RuntimeError(f"Dry run failed; execution blocked: {dry_warning}") from error
+    query_job = client.query(sql_script, job_config=job_config(False), location=LOCATION)
+    rows = query_job.result(timeout=QUERY_TIMEOUT_SECONDS)
+    if rows.schema:
+        dataframe = rows.to_dataframe(create_bqstorage_client=True)
+        if MAX_RESULT_ROWS is not None: dataframe = dataframe.head(MAX_RESULT_ROWS)
+    else: dataframe = pd.DataFrame()
+    return dataframe, query_job, dry_bytes, dry_warning
+
+def format_workbook(data: bytes) -> bytes:
+    wb = load_workbook(BytesIO(data)); header_fill = PatternFill("solid", fgColor="1F4E78"); header_font = Font(color="FFFFFF", bold=True)
+    green = PatternFill("solid", fgColor="C6EFCE"); red = PatternFill("solid", fgColor="FFC7CE"); yellow = PatternFill("solid", fgColor="FFEB9C")
+    for ws in wb.worksheets:
+        ws.freeze_panes = "A2"
+        if ws.max_row and ws.max_column: ws.auto_filter.ref = ws.dimensions
+        for cell in ws[1]: cell.fill, cell.font, cell.alignment = header_fill, header_font, Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for cells in ws.iter_cols():
+            width = max((min(len(str(c.value or "")), 70) for c in list(cells)[:200]), default=10)
+            ws.column_dimensions[get_column_letter(cells[0].column)].width = min(max(width+2, 12), 70)
+        if ws.title == "Execution_Summary":
+            headers = {c.value: c.column for c in ws[1]}
+            for r in range(2, ws.max_row+1):
+                if headers.get("Status"):
+                    c = ws.cell(r, headers["Status"]); c.fill = green if c.value == "SUCCESS" else red
+                if headers.get("Dry_Run_Warning"):
+                    c = ws.cell(r, headers["Dry_Run_Warning"])
+                    if c.value:
+                        c.fill = yellow
+    out = BytesIO(); wb.save(out); return out.getvalue()
+
+def execute_all_sql():
+    sc = storage.Client(project=RUNTIME_PROJECT_ID); bc = bigquery.Client(project=BIGQUERY_JOB_PROJECT_ID, location=LOCATION); bucket = sc.bucket(INPUT_BUCKET)
+    blobs = sorted([b for b in sc.list_blobs(bucket, prefix=INPUT_FOLDER.rstrip('/') + '/') if b.name.lower().endswith('.sql') and not b.name.endswith('/')], key=lambda b: b.name.lower())
+    if not blobs: raise FileNotFoundError(f"No READY SQL files found at gs://{INPUT_BUCKET}/{INPUT_FOLDER}")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S"); output_object = f"{OUTPUT_FOLDER.rstrip('/')}/BQ_SQL_Execution_Report_{stamp}.xlsx"
+    records: List[Dict[str, object]] = []; used = {"dashboard", "execution_summary", "configuration"}; buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for seq, blob in enumerate(blobs, 1):
+            name = PurePosixPath(blob.name).name; uri = f"gs://{INPUT_BUCKET}/{blob.name}"; started = datetime.now(timezone.utc); clock = time.perf_counter()
+            rec = {"S_No":seq,"SQL_File":name,"GCS_Source_URI":uri,"Status":"FAILED","Rows_Returned":0,"Result_Sheets":"","Dry_Run_Bytes":None,"Dry_Run_Warning":"","Processed_Bytes":None,"Billed_Bytes":None,"Cache_Hit":None,"BigQuery_Job_ID":"","Location":LOCATION,"Started_UTC":started.isoformat(),"Duration_Seconds":0,"Error_Message":""}; query_job = None
+            try:
+                LOG.info("[%s/%s] Executing %s", seq, len(blobs), uri); sql = blob.download_as_text(encoding="utf-8").lstrip("\ufeff").strip()
+                if not sql: raise ValueError("SQL file is empty")
+                if not re.match(r"^(SELECT|WITH)\b", sql, re.I): raise ValueError("Executor accepts only SELECT or WITH queries")
+                df, query_job, dry_bytes, dry_warning = execute_script(bc, sql); sheets = write_result(writer, df, name, used)
+                rec.update({"Status":"SUCCESS","Rows_Returned":len(df),"Result_Sheets":", ".join(sheets),"Dry_Run_Bytes":dry_bytes,"Dry_Run_Warning":dry_warning,"Processed_Bytes":query_job.total_bytes_processed,"Billed_Bytes":query_job.total_bytes_billed,"Cache_Hit":query_job.cache_hit,"BigQuery_Job_ID":query_job.job_id})
+            except Exception as error:
+                rec["Error_Message"] = f"{type(error).__name__}: {error}"; LOG.error("FAILED | %s\n%s", name, traceback.format_exc())
+                if query_job is not None: rec["BigQuery_Job_ID"] = query_job.job_id
+            finally: rec["Duration_Seconds"] = round(time.perf_counter()-clock, 3); records.append(rec)
+            if rec["Status"] == "FAILED" and not CONTINUE_ON_ERROR: break
+        summary = pd.DataFrame(records); success = int((summary.Status == "SUCCESS").sum()); failed = int((summary.Status == "FAILED").sum())
+        pd.DataFrame({"Metric":["Total SQL Files","Successful Executions","Failed Executions","Generated UTC"],"Value":[len(summary),success,failed,datetime.now(timezone.utc).isoformat()]}).to_excel(writer, sheet_name="Dashboard", index=False)
+        summary.to_excel(writer, sheet_name="Execution_Summary", index=False)
+        pd.DataFrame({"Parameter":["Execution Project ID","Data Project ID","Location","Input URI","Output URI","Max Result Rows"],"Value":[EXECUTION_PROJECT_ID,DATA_PROJECT_ID,LOCATION,f"gs://{INPUT_BUCKET}/{INPUT_FOLDER}",f"gs://{OUTPUT_BUCKET}/{output_object}",MAX_RESULT_ROWS]}).to_excel(writer, sheet_name="Configuration", index=False)
+    payload = format_workbook(buffer.getvalue()); sc.bucket(OUTPUT_BUCKET).blob(output_object).upload_from_string(payload, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return f"gs://{OUTPUT_BUCKET}/{output_object}", summary
+
+def main():
+    try:
+        uri, summary = execute_all_sql(); failed = int((summary.Status == "FAILED").sum()); print(f"\nOutput: {uri}\nSuccessful: {(summary.Status == 'SUCCESS').sum()}\nFailed: {failed}")
+        if failed: sys.exit(2)
+    except gexc.Forbidden as error: LOG.error("Permission denied: %s", error); sys.exit(1)
+    except Exception as error: LOG.exception("Execution failed: %s", error); sys.exit(1)
+if __name__ == "__main__": main()
